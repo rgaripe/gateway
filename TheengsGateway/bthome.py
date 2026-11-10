@@ -10,9 +10,41 @@ BTHOME_OBJECTS = {
     0x03: {"name": "hum", "kind": "number", "size": 2, "signed": False, "divisor": 100},
     0x2E: {"name": "hum", "kind": "number", "size": 1, "signed": False, "divisor": 1},
     0x45: {"name": "tempc", "kind": "number", "size": 2, "signed": True, "divisor": 10},
-    0x3A: {"name": "button", "kind": "button", "size": 1},
     0x53: {"name": "text", "kind": "text", "size": None},
     0x04: {"name": "pres", "kind": "number", "size": 3, "signed": False, "divisor": 100},
+    0x3A: {"name": "button", "kind": "button", "size": 1, "events": {
+        1: "press",
+        2: "double_press",
+        3: "triple_press",
+        4: "long_press",
+        5: "long_double_press",
+        6: "long_triple_press",
+        128: "hold_press",
+    }},
+}
+
+
+
+def read_number(spec: dict, value_bytes: bytes) -> float:
+    """Read a little-endian integer and scale it by the divisor."""
+    raw = int.from_bytes(value_bytes, "little", signed=spec["signed"])
+    return raw / spec["divisor"]
+
+
+def read_button(spec: dict, value_bytes: bytes) -> str | int:
+    """Translate an event code into its name, or return the code if unknown."""
+    return spec["events"].get(value_bytes[0], value_bytes[0])
+
+
+def read_text(spec: dict, value_bytes: bytes) -> str:
+    """Decode the text from the value bytes."""
+    return value_bytes.decode("utf-8")
+
+
+READERS = {
+    "number": read_number,
+    "button": read_button,
+    "text": read_text,
 }
 
 
@@ -49,22 +81,12 @@ def parse_bthome_v2(servicedata_hex: str) -> dict | None:
         if value_end > len(data):
             return
         value_bytes = data[value_start:value_end]
-        if spec["kind"] == "button":
-            if value_bytes[0] == 1:
-                value = "press"
-            elif value_bytes[0] == 2:
-                value = "double_press"
-            else:
-                value = value_bytes[0]
-        elif spec["kind"] == "text":
-            try:
-                value = value_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                return None
-        else:
-            value = int.from_bytes(
-                value_bytes, "little", signed=spec["signed"]
-            ) / spec["divisor"]
+        # Pick the reader function for this kind of object and call it.
+        reader = READERS[spec["kind"]]
+        try:
+            value = reader(spec, value_bytes)
+        except UnicodeDecodeError:
+            return None
 
         name = spec["name"]
         # If the name is already taken, add a suffix (_2, _3, ...) so that
