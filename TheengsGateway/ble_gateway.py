@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from bleak.backends.device import BLEDevice
     from bleak.backends.scanner import AdvertisementData
 
+from .bthome import parse_bthome_v2
 from .decryption import UnsupportedEncryptionError, create_decryptor
 from .diagnose import diagnostics
 from .privacy import resolve_private_address
@@ -81,16 +82,7 @@ LOG_LEVEL = {
     "ERROR": logging.ERROR,
     "CRITICAL": logging.CRITICAL,
 }
-BTHOME_OBJECTS = {
-    0x01: {"name": "batt", "kind": "number", "size": 1, "signed": False, "divisor": 1},
-    0x02: {"name": "tempc", "kind": "number", "size": 2, "signed": True, "divisor": 100},
-    0x03: {"name": "hum", "kind": "number", "size": 2, "signed": False, "divisor": 100},
-    0x2E: {"name": "hum", "kind": "number", "size": 1, "signed": False, "divisor": 1},
-    0x45: {"name": "tempc", "kind": "number", "size": 2, "signed": True, "divisor": 10},
-    0x3A: {"name": "button", "kind": "button", "size": 1},
-    0x53: {"name": "text", "kind": "text", "size": None},
-    0x04: {"name": "pres", "kind": "number", "size": 3, "signed": False, "divisor": 100},
-}
+
 
 logger = logging.getLogger("BLEGateway")
 
@@ -553,66 +545,6 @@ class Gateway:
             data_json["id"] = address
             data_json["rssi"] = advertisement_data.rssi
             self.decode_advertisement(data_json)
-    def parse_bthome_v2(self, servicedata_hex: str) -> DataJSONType | None:
-        """Parse BTHome v2 service data."""
-        try:
-            data = bytes.fromhex(servicedata_hex)
-        except ValueError:
-            return
-        if len(data) == 0 or data[0] & 1:# if data exist, and if last bit of first byte is 1, then it is encrypted, so we don't parse it
-            return
-        if (data[0] >> 5) != 2: # if first 3 bits of first byte is not 010(it means 2), then it is not BTHome v2, so we don't parse it
-            return
-        position = 1
-        result = {}
-        while position < len(data):
-            object_id = data[position]
-            spec = BTHOME_OBJECTS.get(object_id)#without get, it returns KeyError if object_id is not in BTHOME_OBJECTS, with get, it returns None
-            if spec is None:
-                break
-            if spec["kind"] == "text":
-                if position + 1 >= len(data):
-                    return None
-                value_size = data[position + 1]
-                value_start = position + 2
-            else:
-                value_size = spec["size"]
-                value_start = position + 1
-
-            value_end = value_start + value_size
-            if value_end > len(data):
-                return
-            value_bytes = data[value_start:value_end]
-            if spec["kind"] == "button":
-                if value_bytes[0] == 1:
-                    value = "press"
-                elif value_bytes[0] == 2:
-                    value = "double_press"
-                else:
-                    value = value_bytes[0]
-            elif spec["kind"] == "text":
-                try:
-                    value = value_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    return None
-            else:
-                value = int.from_bytes(
-                    value_bytes, "little", signed=spec["signed"]
-                ) / spec["divisor"]
-
-            name = spec["name"]
-            if name in result:#check if name already exists in result, if yes, then add _number to the name, and increment number until name_number is not in result
-                number = 2
-                while f"{name}_{number}" in result:
-                    number += 1
-                name = f"{name}_{number}"
-
-            result[name] = value
-            position = value_end
-        if not result:
-            return None
-        return result
-
 
     def decode_advertisement(
         self,
@@ -621,7 +553,8 @@ class Gateway:
         """Decode device from data JSON."""
         decoded_json = decodeBLE(json.dumps(data_json))
         if data_json.get("servicedatauuid") == "fcd2" and not decoded_json:
-            result = self.parse_bthome_v2(data_json.get("servicedata", ""))
+            # If the service data is BTHome v2 and it's not decoded, try to parse it
+            result = parse_bthome_v2(data_json.get("servicedata", ""))
             if result is not None:
                 result["id"] = data_json["id"]
                 self.publish_json(result, decoded=False)
